@@ -1,0 +1,126 @@
+
+# Load Libraries ----------------------------------------------------------
+library(tidyverse)
+library(tidymodels)
+library(vroom)
+library(skimr)
+library(DataExplorer)
+library(patchwork)
+library(glmnet)
+library(ranger)
+library(ggmosaic)
+library(embed)
+library(tensorflow)
+library(themis) 
+library(jsonlite)
+library(tidyverse)
+library(tidytext)
+library(dplyr)
+
+setwd("~/GitHub/WhatsCooking")
+
+trainSet <- read_file("train.json") %>%
+  fromJSON()
+
+testSet <- read_file("test.json") %>%
+  fromJSON()
+
+trainSet %>%
+  unnest(ingredients) %>%
+  slice(1:10)
+
+testSet %>%
+  unnest(ingredients) 
+
+# Ingredient_Total <- trainSet %>%
+#   mutate(ingredient_count = lengths(ingredients)) %>%
+#   select(id, cuisine, ingredient_count)
+# 
+# Ingredient_Milk <- trainSet %>%
+#   mutate(ingredient_Milk = grepl("milk", 
+#                                  tolower(paste(ingredients, collapse=" ")))) %>%
+#   select(id, cuisine, ingredient_Milk)
+# 
+# Ingredient_honey <- trainSet %>%
+#   mutate(ingredient_honey = grepl("milk", 
+#                                  tolower(paste(ingredients, collapse=" ")))) %>%
+#   select(id, cuisine, ingredient_honey)
+
+
+train_data <- trainSet %>%
+  mutate(
+    ingredient_count = lengths(ingredients),
+    ingredient_Milk = map_lgl(ingredients, ~ any(grepl("milk", tolower(.)))),
+    ingredient_Egg  = map_lgl(ingredients, ~ any(grepl("egg", tolower(.))))
+  ) %>%
+  select(id, cuisine, ingredient_count, ingredient_Milk, ingredient_Egg)
+
+test_data <- testSet %>%
+  mutate(
+    ingredient_count = lengths(ingredients),
+    ingredient_Milk = map_lgl(ingredients, ~ any(grepl("milk", tolower(.)))),
+    ingredient_Egg  = map_lgl(ingredients, ~ any(grepl("egg", tolower(.))))
+  ) %>%
+  select(id, ingredient_count, ingredient_Milk, ingredient_Egg)
+
+my_recipe <- recipe(cuisine ~ ., data = train_data) %>%
+  step_rm(id) %>%
+  step_dummy(all_nominal_predictors())
+
+my_mod <- rand_forest(
+  mtry = tune(),
+  min_n = tune(),
+  trees = 500
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+grid_of_tuning_params <- grid_regular(
+  mtry(range = c(2, 3)),   
+  min_n(range = c(2, 10)),
+  levels = 3
+)
+
+folds <- vfold_cv(train_data, v = 5, strata = cuisine)
+
+rf_workflow <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(my_mod)
+
+CV_results <- rf_workflow %>%
+  tune_grid(
+    resamples = folds,
+    grid = grid_of_tuning_params,
+    metrics = metric_set(roc_auc),
+    control = control_grid(save_pred = FALSE, verbose = TRUE)
+  )
+
+bestTune <- select_best(CV_results, metric = "roc_auc")
+
+final_wf <- rf_workflow %>%
+  finalize_workflow(bestTune) %>%
+  fit(data = train_data)
+
+cuisine_predictions <- predict(
+  final_wf,
+  new_data = test_data,
+  type = "prob"
+)
+
+pred_class <- predict(final_wf, test_data) %>%
+  rename(cuisine = .pred_class)
+
+kaggle_submission <- test_data %>%
+  select(id) %>%
+  bind_cols(pred_class)
+
+vroom_write(
+  kaggle_submission,
+  file = "./RFPreds.csv",
+  delim = ","
+)
+
+
+
+
+
