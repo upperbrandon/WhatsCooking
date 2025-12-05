@@ -13,9 +13,9 @@ library(embed)
 library(tensorflow)
 library(themis) 
 library(jsonlite)
-library(tidyverse)
 library(tidytext)
 library(dplyr)
+library(textrecipes)
 
 setwd("~/GitHub/WhatsCooking")
 
@@ -25,12 +25,23 @@ trainSet <- read_file("train.json") %>%
 testSet <- read_file("test.json") %>%
   fromJSON()
 
-trainSet %>%
-  unnest(ingredients) %>%
-  slice(1:10)
+# Make sure ingredients is a text column
+trainSet <- trainSet %>% mutate(ingredients = map_chr(ingredients, ~ paste(.x, collapse = " ")))
+testSet  <- testSet  %>% mutate(ingredients = map_chr(ingredients, ~ paste(.x, collapse = " ")))
 
-testSet %>%
-  unnest(ingredients) 
+# ---- TF-IDF Recipe ----
+my_recipe <- recipe(cuisine ~ ingredients, data = trainSet) %>%
+  step_tokenize(ingredients) %>%          # tokenize text
+  step_tokenfilter(ingredients, max_tokens = 500) %>% 
+  step_tfidf(ingredients)          
+
+
+# trainSet %>%
+#   unnest(ingredients) %>%
+#   slice(1:10)
+# 
+# testSet %>%
+#   unnest(ingredients) 
 
 # Ingredient_Total <- trainSet %>%
 #   mutate(ingredient_count = lengths(ingredients)) %>%
@@ -46,26 +57,26 @@ testSet %>%
 #                                  tolower(paste(ingredients, collapse=" ")))) %>%
 #   select(id, cuisine, ingredient_honey)
 
-
-train_data <- trainSet %>%
-  mutate(
-    ingredient_count = lengths(ingredients),
-    ingredient_Milk = map_lgl(ingredients, ~ any(grepl("milk", tolower(.)))),
-    ingredient_Egg  = map_lgl(ingredients, ~ any(grepl("egg", tolower(.))))
-  ) %>%
-  select(id, cuisine, ingredient_count, ingredient_Milk, ingredient_Egg)
-
-test_data <- testSet %>%
-  mutate(
-    ingredient_count = lengths(ingredients),
-    ingredient_Milk = map_lgl(ingredients, ~ any(grepl("milk", tolower(.)))),
-    ingredient_Egg  = map_lgl(ingredients, ~ any(grepl("egg", tolower(.))))
-  ) %>%
-  select(id, ingredient_count, ingredient_Milk, ingredient_Egg)
-
-my_recipe <- recipe(cuisine ~ ., data = train_data) %>%
-  step_rm(id) %>%
-  step_dummy(all_nominal_predictors())
+# 
+# train_data <- trainSet %>%
+#   mutate(
+#     ingredient_count = lengths(ingredients),
+#     ingredient_Milk = map_lgl(ingredients, ~ any(grepl("milk", tolower(.)))),
+#     ingredient_Egg  = map_lgl(ingredients, ~ any(grepl("egg", tolower(.))))
+#   ) %>%
+#   select(id, cuisine, ingredient_count, ingredient_Milk, ingredient_Egg)
+# 
+# test_data <- testSet %>%
+#   mutate(
+#     ingredient_count = lengths(ingredients),
+#     ingredient_Milk = map_lgl(ingredients, ~ any(grepl("milk", tolower(.)))),
+#     ingredient_Egg  = map_lgl(ingredients, ~ any(grepl("egg", tolower(.))))
+#   ) %>%
+#   select(id, ingredient_count, ingredient_Milk, ingredient_Egg)
+# 
+# my_recipe <- recipe(cuisine ~ ., data = train_data) %>%
+#   step_rm(id) %>%
+#   step_dummy(all_nominal_predictors())
 
 my_mod <- rand_forest(
   mtry = tune(),
@@ -81,7 +92,7 @@ grid_of_tuning_params <- grid_regular(
   levels = 3
 )
 
-folds <- vfold_cv(train_data, v = 5, strata = cuisine)
+folds <- vfold_cv(trainSet, v = 5, strata = cuisine)
 
 rf_workflow <- workflow() %>%
   add_recipe(my_recipe) %>%
@@ -99,18 +110,18 @@ bestTune <- select_best(CV_results, metric = "roc_auc")
 
 final_wf <- rf_workflow %>%
   finalize_workflow(bestTune) %>%
-  fit(data = train_data)
+  fit(data = trainSet)
 
 cuisine_predictions <- predict(
   final_wf,
-  new_data = test_data,
+  new_data = testSet,
   type = "prob"
 )
 
-pred_class <- predict(final_wf, test_data) %>%
+pred_class <- predict(final_wf, testSet) %>%
   rename(cuisine = .pred_class)
 
-kaggle_submission <- test_data %>%
+kaggle_submission <- testSet %>%
   select(id) %>%
   bind_cols(pred_class)
 
