@@ -16,7 +16,7 @@ library(jsonlite)
 library(tidytext)
 library(dplyr)
 library(textrecipes)
-
+library(bonsai)
 setwd("~/GitHub/WhatsCooking")
 
 trainSet <- read_file("train.json") %>%
@@ -78,18 +78,19 @@ my_recipe <- recipe(cuisine ~ ingredients, data = trainSet) %>%
 #   step_rm(id) %>%
 #   step_dummy(all_nominal_predictors())
 
+# RF ----------------------------------------------------------------------
 my_mod <- rand_forest(
   mtry = tune(),
   min_n = tune(),
-  trees = 500
+  trees = 1500
 ) %>%
   set_engine("ranger", importance = "impurity") %>%
   set_mode("classification")
 
 grid_of_tuning_params <- grid_regular(
-  mtry(range = c(2, 3)),   
+  mtry(range = c(2, 4)),   
   min_n(range = c(2, 10)),
-  levels = 3
+  levels = 4
 )
 
 folds <- vfold_cv(trainSet, v = 5, strata = cuisine)
@@ -133,5 +134,50 @@ vroom_write(
 
 
 
+# Boost -------------------------------------------------------------------
+
+boost_model <- boost_tree(
+  trees = tune(),
+  tree_depth = tune(),
+  learn_rate = tune()
+) %>%
+  set_engine("lightgbm") %>%
+  set_mode("classification")
+
+
+boost_workflow <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(boost_model)
+
+folds <- vfold_cv(trainSet, v = 5)
+
+grid_of_tuning_params <- grid_regular(
+  trees(range = c(200, 1000)),
+  tree_depth(range = c(2, 10)),
+  learn_rate(range = c(0.001, 0.3)),
+  levels = 4
+)
+
+CV_results <- boost_workflow %>%
+  tune_grid(resamples=folds,
+            grid=grid_of_tuning_params,
+            metrics=metric_set(roc_auc))
+
+bestTune <- CV_results %>%
+  select_best(metric="roc_auc")
+
+final_wf <-
+  boost_workflow %>%
+  finalize_workflow(bestTune) %>%
+  fit(data=trainSet)
+
+boost_preds <- predict(final_wf, new_data=testSet, type="class") %>%
+  rename(cuisine = .pred_class)
+
+kaggle_submission_lm <- testSet %>%
+  select(id) %>%
+  bind_cols(boost_preds)
+
+vroom_write(x = kaggle_submission_lm, file = "./BoostPreds.csv", delim = ",")
 
 
