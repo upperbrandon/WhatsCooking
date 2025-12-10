@@ -82,7 +82,7 @@ my_recipe <- recipe(cuisine ~ ingredients, data = trainSet) %>%
 my_mod <- rand_forest(
   mtry = tune(),
   min_n = tune(),
-  trees = 1500
+  trees = 400
 ) %>%
   set_engine("ranger", importance = "impurity") %>%
   set_mode("classification")
@@ -90,7 +90,7 @@ my_mod <- rand_forest(
 grid_of_tuning_params <- grid_regular(
   mtry(range = c(2, 4)),   
   min_n(range = c(2, 10)),
-  levels = 4
+  levels = 5
 )
 
 folds <- vfold_cv(trainSet, v = 5, strata = cuisine)
@@ -103,11 +103,11 @@ CV_results <- rf_workflow %>%
   tune_grid(
     resamples = folds,
     grid = grid_of_tuning_params,
-    metrics = metric_set(roc_auc),
+    metrics = metric_set(accuracy, roc_auc, pr_auc, f_meas, precision, recall),
     control = control_grid(save_pred = FALSE, verbose = TRUE)
   )
 
-bestTune <- select_best(CV_results, metric = "roc_auc")
+bestTune <- select_best(CV_results, metric = "recall")
 
 final_wf <- rf_workflow %>%
   finalize_workflow(bestTune) %>%
@@ -132,52 +132,130 @@ vroom_write(
   delim = ","
 )
 
+# Light GBM
 
-
-# Boost -------------------------------------------------------------------
-
-boost_model <- boost_tree(
-  trees = tune(),
-  tree_depth = tune(),
-  learn_rate = tune()
+my_mod <- boost_tree(
+  trees        = 100,
+  tree_depth   = tune(),
+  learn_rate   = tune(),
+  min_n        = tune(),
+  loss_reduction = tune(),
+  sample_size  = tune()
 ) %>%
   set_engine("lightgbm") %>%
   set_mode("classification")
 
 
-boost_workflow <- workflow() %>%
-  add_recipe(my_recipe) %>%
-  add_model(boost_model)
-
-folds <- vfold_cv(trainSet, v = 5)
-
 grid_of_tuning_params <- grid_regular(
-  trees(range = c(200, 1000)),
   tree_depth(range = c(2, 10)),
-  learn_rate(range = c(0.001, 0.3)),
-  levels = 4
+  learn_rate(range = c(-3, -1)),   # log10 scale: 0.001–0.1
+  min_n(range = c(2, 20)),
+  loss_reduction(range = c(-5, -1)),  # gamma regularization, log10 scale
+  sample_size(range = c(1, 10)),   # subsampling
+  levels = 3
 )
 
-CV_results <- boost_workflow %>%
-  tune_grid(resamples=folds,
-            grid=grid_of_tuning_params,
-            metrics=metric_set(roc_auc))
 
-bestTune <- CV_results %>%
-  select_best(metric="roc_auc")
+folds <- vfold_cv(trainSet, v = 3,strata = cuisine)
 
-final_wf <-
-  boost_workflow %>%
+
+lgbm_workflow <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(my_mod)
+
+
+
+CV_results <- lgbm_workflow %>%
+  tune_grid(
+    resamples = folds,
+    grid      = grid_of_tuning_params,
+    metrics = metric_set(
+      accuracy, roc_auc, pr_auc,
+      f_meas, precision, recall
+    ),
+    control = control_grid(
+      save_pred = FALSE,
+      verbose = TRUE
+    )
+  )
+
+bestTune <- select_best(CV_results, metric = "f_meas")
+
+
+# ------------------------- #
+# Final model
+# ------------------------- #
+
+final_wf <- lgbm_workflow %>%
   finalize_workflow(bestTune) %>%
-  fit(data=trainSet)
+  fit(data = trainSet)
 
-boost_preds <- predict(final_wf, new_data=testSet, type="class") %>%
+cuisine_predictions <- predict(
+  final_wf,
+  new_data = testSet,
+  type = "prob"
+)
+
+pred_class <- predict(final_wf, testSet) %>%
   rename(cuisine = .pred_class)
 
-kaggle_submission_lm <- testSet %>%
+
+
+kaggle_submission <- testSet %>%
   select(id) %>%
-  bind_cols(boost_preds)
+  bind_cols(pred_class)
 
-vroom_write(x = kaggle_submission_lm, file = "./BoostPreds.csv", delim = ",")
+vroom_write(
+  kaggle_submission,
+  file = "./LightGBM_Preds.csv",
+  delim = ","
+)
 
 
+# Boost -------------------------------------------------------------------
+# 
+# boost_model <- boost_tree(
+#   trees = tune(),
+#   tree_depth = tune(),
+#   learn_rate = tune()
+# ) %>%
+#   set_engine("lightgbm") %>%
+#   set_mode("classification")
+# 
+# 
+# boost_workflow <- workflow() %>%
+#   add_recipe(my_recipe) %>%
+#   add_model(boost_model)
+# 
+# folds <- vfold_cv(trainSet, v = 5)
+# 
+# grid_of_tuning_params <- grid_regular(
+#   trees(range = c(200, 1000)),
+#   tree_depth(range = c(2, 10)),
+#   learn_rate(range = c(0.001, 0.3)),
+#   levels = 4
+# )
+# 
+# CV_results <- boost_workflow %>%
+#   tune_grid(resamples=folds,
+#             grid=grid_of_tuning_params,
+#             metrics=metric_set(roc_auc))
+# 
+# bestTune <- CV_results %>%
+#   select_best(metric="roc_auc")
+# 
+# final_wf <-
+#   boost_workflow %>%
+#   finalize_workflow(bestTune) %>%
+#   fit(data=trainSet)
+# 
+# boost_preds <- predict(final_wf, new_data=testSet, type="class") %>%
+#   rename(cuisine = .pred_class)
+# 
+# kaggle_submission_lm <- testSet %>%
+#   select(id) %>%
+#   bind_cols(boost_preds)
+# 
+# vroom_write(x = kaggle_submission_lm, file = "./BoostPreds.csv", delim = ",")
+# 
+# 
